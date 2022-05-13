@@ -4,8 +4,8 @@ name: Testing
 on:
   push:
   pull_request:
-  schedule:
-    - cron: 0 0 * * * # daily at 00:00
+  #schedule:
+    #- cron: 0 0 * * * # daily at 00:00
 
 permissions:
   contents: read
