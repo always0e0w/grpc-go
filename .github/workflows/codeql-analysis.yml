@@ -3,8 +3,8 @@ name: "CodeQL"
 on:
   push:
     branches: [ master ]
-  schedule:
-    - cron: '24 20 * * 3'
+  #schedule:
+    #- cron: '24 20 * * 3'
 
 permissions:
   contents: read
