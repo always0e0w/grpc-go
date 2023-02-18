@@ -25,23 +25,28 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/grpc/balancer"
+	"google.golang.org/grpc/balancer/roundrobin"
+	"google.golang.org/grpc/balancer/weightedtarget"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/internal/grpctest"
+	internalserviceconfig "google.golang.org/grpc/internal/serviceconfig"
 	"google.golang.org/grpc/internal/testutils"
 	"google.golang.org/grpc/resolver"
-	"google.golang.org/grpc/xds/internal"
+	xdsinternal "google.golang.org/grpc/xds/internal"
+	"google.golang.org/grpc/xds/internal/balancer/clusterimpl"
+	"google.golang.org/grpc/xds/internal/balancer/outlierdetection"
+	"google.golang.org/grpc/xds/internal/balancer/priority"
 	"google.golang.org/grpc/xds/internal/testutils/fakeclient"
 	"google.golang.org/grpc/xds/internal/xdsclient"
 	"google.golang.org/grpc/xds/internal/xdsclient/xdsresource"
-
-	_ "google.golang.org/grpc/xds/internal/xdsclient/controller/version/v2" // V2 client registration.
 )
 
 const (
-	defaultTestTimeout      = 1 * time.Second
+	defaultTestTimeout      = 5 * time.Second
 	defaultTestShortTimeout = 10 * time.Millisecond
-	testEDSServcie          = "test-eds-service-name"
+	testEDSService          = "test-eds-service-name"
 	testClusterName         = "test-cluster-name"
 	testClusterName2        = "google_cfe_some-name"
 )
@@ -53,7 +58,7 @@ var (
 		Localities: []xdsresource.Locality{
 			{
 				Endpoints: []xdsresource.Endpoint{{Address: "endpoint1"}},
-				ID:        internal.LocalityID{Zone: "zone"},
+				ID:        xdsinternal.LocalityID{Zone: "zone"},
 				Priority:  1,
 				Weight:    100,
 			},
@@ -99,7 +104,7 @@ func (t *noopTestClientConn) NewSubConn([]resolver.Address, balancer.NewSubConnO
 	return nil, nil
 }
 
-func (noopTestClientConn) Target() string { return testEDSServcie }
+func (noopTestClientConn) Target() string { return testEDSService }
 
 type scStateChange struct {
 	sc    balancer.SubConn
@@ -129,6 +134,18 @@ func (f *fakeChildBalancer) UpdateSubConnState(sc balancer.SubConn, state balanc
 func (f *fakeChildBalancer) Close() {}
 
 func (f *fakeChildBalancer) ExitIdle() {}
+
+func (f *fakeChildBalancer) waitForClientConnStateChangeVerifyBalancerConfig(ctx context.Context, wantCCS balancer.ClientConnState) error {
+	ccs, err := f.clientConnState.Receive(ctx)
+	if err != nil {
+		return err
+	}
+	gotCCS := ccs.(balancer.ClientConnState)
+	if diff := cmp.Diff(gotCCS, wantCCS, cmpopts.IgnoreFields(balancer.ClientConnState{}, "ResolverState")); diff != "" {
+		return fmt.Errorf("received unexpected ClientConnState, diff (-got +want): %v", diff)
+	}
+	return nil
+}
 
 func (f *fakeChildBalancer) waitForClientConnStateChange(ctx context.Context) error {
 	_, err := f.clientConnState.Receive(ctx)
@@ -171,6 +188,9 @@ type fakeSubConn struct{}
 
 func (*fakeSubConn) UpdateAddresses([]resolver.Address) { panic("implement me") }
 func (*fakeSubConn) Connect()                           { panic("implement me") }
+func (*fakeSubConn) GetOrBuildProducer(balancer.ProducerBuilder) (balancer.Producer, func()) {
+	panic("implement me")
+}
 
 // waitForNewChildLB makes sure that a new child LB is created by the top-level
 // clusterResolverBalancer.
@@ -195,10 +215,7 @@ func setup(childLBCh *testutils.Channel) (*fakeclient.Client, func()) {
 		defer func() { childLBCh.Send(childLB) }()
 		return childLB
 	}
-	return xdsC, func() {
-		newChildBalancer = origNewChildBalancer
-		xdsC.Close()
-	}
+	return xdsC, func() { newChildBalancer = origNewChildBalancer }
 }
 
 // TestSubConnStateChange verifies if the top-level clusterResolverBalancer passes on
@@ -217,7 +234,7 @@ func (s) TestSubConnStateChange(t *testing.T) {
 
 	if err := edsB.UpdateClientConnState(balancer.ClientConnState{
 		ResolverState:  xdsclient.SetClient(resolver.State{}, xdsC),
-		BalancerConfig: newLBConfigWithOneEDS(testEDSServcie),
+		BalancerConfig: newLBConfigWithOneEDS(testEDSService),
 	}); err != nil {
 		t.Fatalf("edsB.UpdateClientConnState() failed: %v", err)
 	}
@@ -265,7 +282,7 @@ func (s) TestErrorFromXDSClientUpdate(t *testing.T) {
 	defer cancel()
 	if err := edsB.UpdateClientConnState(balancer.ClientConnState{
 		ResolverState:  xdsclient.SetClient(resolver.State{}, xdsC),
-		BalancerConfig: newLBConfigWithOneEDS(testEDSServcie),
+		BalancerConfig: newLBConfigWithOneEDS(testEDSService),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +336,7 @@ func (s) TestErrorFromXDSClientUpdate(t *testing.T) {
 	// An update with the same service name should not trigger a new watch.
 	if err := edsB.UpdateClientConnState(balancer.ClientConnState{
 		ResolverState:  xdsclient.SetClient(resolver.State{}, xdsC),
-		BalancerConfig: newLBConfigWithOneEDS(testEDSServcie),
+		BalancerConfig: newLBConfigWithOneEDS(testEDSService),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +370,7 @@ func (s) TestErrorFromResolver(t *testing.T) {
 	defer cancel()
 	if err := edsB.UpdateClientConnState(balancer.ClientConnState{
 		ResolverState:  xdsclient.SetClient(resolver.State{}, xdsC),
-		BalancerConfig: newLBConfigWithOneEDS(testEDSServcie),
+		BalancerConfig: newLBConfigWithOneEDS(testEDSService),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +421,7 @@ func (s) TestErrorFromResolver(t *testing.T) {
 	// the previous watch was canceled.
 	if err := edsB.UpdateClientConnState(balancer.ClientConnState{
 		ResolverState:  xdsclient.SetClient(resolver.State{}, xdsC),
-		BalancerConfig: newLBConfigWithOneEDS(testEDSServcie),
+		BalancerConfig: newLBConfigWithOneEDS(testEDSService),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -498,5 +515,96 @@ func newLBConfigWithOneEDS(edsServiceName string) *LBConfig {
 			Type:           DiscoveryMechanismTypeEDS,
 			EDSServiceName: edsServiceName,
 		}},
+	}
+}
+
+func newLBConfigWithOneEDSAndOutlierDetection(edsServiceName string, odCfg outlierdetection.LBConfig) *LBConfig {
+	lbCfg := newLBConfigWithOneEDS(edsServiceName)
+	lbCfg.DiscoveryMechanisms[0].OutlierDetection = odCfg
+	return lbCfg
+}
+
+// TestOutlierDetection tests the Balancer Config sent down to the child
+// priority balancer when Outlier Detection is turned on. The Priority
+// Configuration sent downward should have a top level Outlier Detection Policy
+// for each priority.
+func (s) TestOutlierDetection(t *testing.T) {
+	edsLBCh := testutils.NewChannel()
+	xdsC, cleanup := setup(edsLBCh)
+	defer cleanup()
+	builder := balancer.Get(Name)
+	edsB := builder.Build(newNoopTestClientConn(), balancer.BuildOptions{})
+	if edsB == nil {
+		t.Fatalf("builder.Build(%s) failed and returned nil", Name)
+	}
+	defer edsB.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
+	defer cancel()
+
+	// Update Cluster Resolver with Client Conn State with Outlier Detection
+	// configuration present. This is what will be passed down to this balancer,
+	// as CDS Balancer gets the Cluster Update and converts the Outlier
+	// Detection data to an Outlier Detection configuration and sends it to this
+	// level.
+	if err := edsB.UpdateClientConnState(balancer.ClientConnState{
+		ResolverState:  xdsclient.SetClient(resolver.State{}, xdsC),
+		BalancerConfig: newLBConfigWithOneEDSAndOutlierDetection(testEDSService, noopODCfg),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := xdsC.WaitForWatchEDS(ctx); err != nil {
+		t.Fatalf("xdsClient.WatchEndpoints failed with error: %v", err)
+	}
+
+	// Invoke EDS Callback - causes child balancer to be built and then
+	// UpdateClientConnState called on it with Outlier Detection as a direct
+	// child.
+	xdsC.InvokeWatchEDSCallback("", defaultEndpointsUpdate, nil)
+	edsLB, err := waitForNewChildLB(ctx, edsLBCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	localityID := xdsinternal.LocalityID{Zone: "zone"}
+	// The priority configuration generated should have Outlier Detection as a
+	// direct child due to Outlier Detection being turned on.
+	pCfgWant := &priority.LBConfig{
+		Children: map[string]*priority.Child{
+			"priority-0-0": {
+				Config: &internalserviceconfig.BalancerConfig{
+					Name: outlierdetection.Name,
+					Config: &outlierdetection.LBConfig{
+						Interval: 1<<63 - 1,
+						ChildPolicy: &internalserviceconfig.BalancerConfig{
+							Name: clusterimpl.Name,
+							Config: &clusterimpl.LBConfig{
+								Cluster:        testClusterName,
+								EDSServiceName: "test-eds-service-name",
+								ChildPolicy: &internalserviceconfig.BalancerConfig{
+									Name: weightedtarget.Name,
+									Config: &weightedtarget.LBConfig{
+										Targets: map[string]weightedtarget.Target{
+											assertString(localityID.ToString): {
+												Weight:      100,
+												ChildPolicy: &internalserviceconfig.BalancerConfig{Name: roundrobin.Name},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				IgnoreReresolutionRequests: true,
+			},
+		},
+		Priorities: []string{"priority-0-0"},
+	}
+
+	if err := edsLB.waitForClientConnStateChangeVerifyBalancerConfig(ctx, balancer.ClientConnState{
+		BalancerConfig: pCfgWant,
+	}); err != nil {
+		t.Fatalf("EDS impl got unexpected update: %v", err)
 	}
 }

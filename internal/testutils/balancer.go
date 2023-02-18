@@ -68,6 +68,11 @@ func (tsc *TestSubConn) Connect() {
 	}
 }
 
+// GetOrBuildProducer is a no-op.
+func (tsc *TestSubConn) GetOrBuildProducer(balancer.ProducerBuilder) (balancer.Producer, func()) {
+	return nil, nil
+}
+
 // String implements stringer to print human friendly error message.
 func (tsc *TestSubConn) String() string {
 	return tsc.id
@@ -187,6 +192,102 @@ func (tcc *TestClientConn) WaitForErrPicker(ctx context.Context) error {
 	return nil
 }
 
+// WaitForPickerWithErr waits until an error picker is pushed to this
+// ClientConn with the error matching the wanted error.  Returns an error if
+// the provided context expires, including the last received picker error (if
+// any).
+func (tcc *TestClientConn) WaitForPickerWithErr(ctx context.Context, want error) error {
+	lastErr := errors.New("received no picker")
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout when waiting for an error picker with %v; last picker error: %v", want, lastErr)
+		case picker := <-tcc.NewPickerCh:
+			if _, lastErr = picker.Pick(balancer.PickInfo{}); lastErr != nil && lastErr.Error() == want.Error() {
+				return nil
+			}
+		}
+	}
+}
+
+// WaitForConnectivityState waits until the state pushed to this ClientConn
+// matches the wanted state.  Returns an error if the provided context expires,
+// including the last received state (if any).
+func (tcc *TestClientConn) WaitForConnectivityState(ctx context.Context, want connectivity.State) error {
+	var lastState connectivity.State = -1
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout when waiting for state to be %s; last state: %s", want, lastState)
+		case s := <-tcc.NewStateCh:
+			if s == want {
+				return nil
+			}
+			lastState = s
+		}
+	}
+}
+
+// WaitForRoundRobinPicker waits for a picker that passes IsRoundRobin.  Also
+// drains the matching state channel and requires it to be READY (if an entry
+// is pending) to be considered.  Returns an error if the provided context
+// expires, including the last received error from IsRoundRobin or the picker
+// (if any).
+func (tcc *TestClientConn) WaitForRoundRobinPicker(ctx context.Context, want ...balancer.SubConn) error {
+	lastErr := errors.New("received no picker")
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout when waiting for round robin picker with %v; last error: %v", want, lastErr)
+		case p := <-tcc.NewPickerCh:
+			s := connectivity.Ready
+			select {
+			case s = <-tcc.NewStateCh:
+			default:
+			}
+			if s != connectivity.Ready {
+				lastErr = fmt.Errorf("received state %v instead of ready", s)
+				break
+			}
+			var pickerErr error
+			if err := IsRoundRobin(want, func() balancer.SubConn {
+				sc, err := p.Pick(balancer.PickInfo{})
+				if err != nil {
+					pickerErr = err
+				} else if sc.Done != nil {
+					sc.Done(balancer.DoneInfo{})
+				}
+				return sc.SubConn
+			}); pickerErr != nil {
+				lastErr = pickerErr
+				continue
+			} else if err != nil {
+				lastErr = err
+				continue
+			}
+			return nil
+		}
+	}
+}
+
+// WaitForPicker waits for a picker that results in f returning nil.  If the
+// context expires, returns the last error returned by f (if any).
+func (tcc *TestClientConn) WaitForPicker(ctx context.Context, f func(balancer.Picker) error) error {
+	lastErr := errors.New("received no picker")
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout when waiting for picker; last error: %v", lastErr)
+		case p := <-tcc.NewPickerCh:
+			if err := f(p); err != nil {
+				lastErr = err
+				continue
+			}
+			return nil
+		}
+	}
+}
+
 // IsRoundRobin checks whether f's return value is roundrobin of elements from
 // want. But it doesn't check for the order. Note that want can contain
 // duplicate items, which makes it weight-round-robin.
@@ -194,16 +295,16 @@ func (tcc *TestClientConn) WaitForErrPicker(ctx context.Context) error {
 // Step 1. the return values of f should form a permutation of all elements in
 // want, but not necessary in the same order. E.g. if want is {a,a,b}, the check
 // fails if f returns:
-//  - {a,a,a}: third a is returned before b
-//  - {a,b,b}: second b is returned before the second a
+//   - {a,a,a}: third a is returned before b
+//   - {a,b,b}: second b is returned before the second a
 //
 // If error is found in this step, the returned error contains only the first
 // iteration until where it goes wrong.
 //
 // Step 2. the return values of f should be repetitions of the same permutation.
 // E.g. if want is {a,a,b}, the check failes if f returns:
-//  - {a,b,a,b,a,a}: though it satisfies step 1, the second iteration is not
-//  repeating the first iteration.
+//   - {a,b,a,b,a,a}: though it satisfies step 1, the second iteration is not
+//     repeating the first iteration.
 //
 // If error is found in this step, the returned error contains the first
 // iteration + the second iteration until where it goes wrong.
@@ -241,6 +342,16 @@ func IsRoundRobin(want []balancer.SubConn, f func() balancer.SubConn) error {
 	}
 
 	return nil
+}
+
+// SubConnFromPicker returns a function which returns a SubConn by calling the
+// Pick() method of the provided picker. There is no caching of SubConns here.
+// Every invocation of the returned function results in a new pick.
+func SubConnFromPicker(p balancer.Picker) func() balancer.SubConn {
+	return func() balancer.SubConn {
+		scst, _ := p.Pick(balancer.PickInfo{})
+		return scst.SubConn
+	}
 }
 
 // ErrTestConstPicker is error returned by test const picker.

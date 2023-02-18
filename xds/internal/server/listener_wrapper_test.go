@@ -26,19 +26,21 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/internal/envconfig"
+	"google.golang.org/grpc/internal/grpctest"
+	"google.golang.org/grpc/internal/testutils"
+	"google.golang.org/grpc/internal/testutils/xds/e2e"
+	"google.golang.org/grpc/xds/internal/testutils/fakeclient"
+	"google.golang.org/grpc/xds/internal/xdsclient/xdsresource"
+
 	v3corepb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	v3listenerpb "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	v3routepb "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	v3httppb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	v3tlspb "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	wrapperspb "github.com/golang/protobuf/ptypes/wrappers"
-	"google.golang.org/grpc/internal/envconfig"
-	"google.golang.org/grpc/internal/grpctest"
-	"google.golang.org/grpc/internal/testutils"
+
 	_ "google.golang.org/grpc/xds/internal/httpfilter/router"
-	"google.golang.org/grpc/xds/internal/testutils/e2e"
-	"google.golang.org/grpc/xds/internal/testutils/fakeclient"
-	"google.golang.org/grpc/xds/internal/xdsclient/xdsresource"
 )
 
 const (
@@ -281,7 +283,7 @@ func (s) TestNewListenerWrapper(t *testing.T) {
 		t.Fatalf("ready channel written to after receipt of a bad Listener update")
 	}
 
-	fcm, err := xdsresource.NewFilterChainManager(listenerWithFilterChains, nil)
+	fcm, err := xdsresource.NewFilterChainManager(listenerWithFilterChains)
 	if err != nil {
 		t.Fatalf("xdsclient.NewFilterChainManager() failed with error: %v", err)
 	}
@@ -345,7 +347,7 @@ func (s) TestNewListenerWrapperWithRouteUpdate(t *testing.T) {
 	if name != testListenerResourceName {
 		t.Fatalf("listenerWrapper registered a lds watch on %s, want %s", name, testListenerResourceName)
 	}
-	fcm, err := xdsresource.NewFilterChainManager(listenerWithRouteConfiguration, nil)
+	fcm, err := xdsresource.NewFilterChainManager(listenerWithRouteConfiguration)
 	if err != nil {
 		t.Fatalf("xdsclient.NewFilterChainManager() failed with error: %v", err)
 	}
@@ -408,7 +410,7 @@ func (s) TestListenerWrapper_Accept(t *testing.T) {
 
 	// Push a good update with a filter chain which accepts local connections on
 	// 192.168.0.0/16 subnet and port 80.
-	fcm, err := xdsresource.NewFilterChainManager(listenerWithFilterChains, nil)
+	fcm, err := xdsresource.NewFilterChainManager(listenerWithFilterChains)
 	if err != nil {
 		t.Fatalf("xdsclient.NewFilterChainManager() failed with error: %v", err)
 	}

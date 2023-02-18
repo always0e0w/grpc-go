@@ -30,7 +30,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -150,12 +150,12 @@ func x509NameHash(r pkix.RDNSequence) string {
 
 // CheckRevocation checks the connection for revoked certificates based on RFC5280.
 // This implementation has the following major limitations:
-// 	* Indirect CRL files are not supported.
-// 	* CRL loading is only supported from directories in the X509_LOOKUP_hash_dir format.
-// 	* OnlySomeReasons is not supported.
-// 	* Delta CRL files are not supported.
-// 	* Certificate CRLDistributionPoint must be URLs, but are then ignored and converted into a file path.
-// 	* CRL checks are done after path building, which goes against RFC4158.
+//   - Indirect CRL files are not supported.
+//   - CRL loading is only supported from directories in the X509_LOOKUP_hash_dir format.
+//   - OnlySomeReasons is not supported.
+//   - Delta CRL files are not supported.
+//   - Certificate CRLDistributionPoint must be URLs, but are then ignored and converted into a file path.
+//   - CRL checks are done after path building, which goes against RFC4158.
 func CheckRevocation(conn tls.ConnectionState, cfg RevocationConfig) error {
 	return CheckChainRevocation(conn.VerifiedChains, cfg)
 }
@@ -238,11 +238,11 @@ func fetchIssuerCRL(rawIssuer []byte, crlVerifyCrt []*x509.Certificate, cfg Revo
 
 	crl, err := fetchCRL(rawIssuer, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("fetchCRL() failed err = %v", err)
+		return nil, fmt.Errorf("fetchCRL() failed: %v", err)
 	}
 
 	if err := verifyCRL(crl, rawIssuer, crlVerifyCrt); err != nil {
-		return nil, fmt.Errorf("verifyCRL() failed err = %v", err)
+		return nil, fmt.Errorf("verifyCRL() failed: %v", err)
 	}
 	if cfg.Cache != nil {
 		cfg.Cache.Add(hex.EncodeToString(rawIssuer), crl)
@@ -264,7 +264,7 @@ func checkCert(c *x509.Certificate, crlVerifyCrt []*x509.Certificate, cfg Revoca
 	}
 	revocation, err := checkCertRevocation(c, crl)
 	if err != nil {
-		grpclogLogger.Warningf("checkCertRevocation(CRL %v) failed %v", crl.CertList.TBSCertList.Issuer, err)
+		grpclogLogger.Warningf("checkCertRevocation(CRL %v) failed: %v", crl.CertList.TBSCertList.Issuer, err)
 		// We couldn't check the CRL file for some reason, so we don't know if it's RevocationUnrevoked or not.
 		return RevocationUndetermined
 	}
@@ -317,7 +317,7 @@ func parseCertIssuerExt(ext pkix.Extension) ([]byte, error) {
 	// GeneralNames ::= SEQUENCE SIZE (1..MAX) OF GeneralName
 	var generalNames []asn1.RawValue
 	if rest, err := asn1.Unmarshal(ext.Value, &generalNames); err != nil || len(rest) != 0 {
-		return nil, fmt.Errorf("asn1.Unmarshal failed err = %v", err)
+		return nil, fmt.Errorf("asn1.Unmarshal failed: %v", err)
 	}
 
 	for _, generalName := range generalNames {
@@ -359,8 +359,8 @@ type authKeyID struct {
 // 		indirectCRL                [4] BOOLEAN DEFAULT FALSE,
 // 		onlyContainsAttributeCerts [5] BOOLEAN DEFAULT FALSE }
 
-// 		-- at most one of onlyContainsUserCerts, onlyContainsCACerts,
-// 		-- and onlyContainsAttributeCerts may be set to TRUE.
+// -- at most one of onlyContainsUserCerts, onlyContainsCACerts,
+// -- and onlyContainsAttributeCerts may be set to TRUE.
 type issuingDistributionPoint struct {
 	DistributionPoint          asn1.RawValue  `asn1:"optional,tag:0"`
 	OnlyContainsUserCerts      bool           `asn1:"optional,tag:1"`
@@ -386,7 +386,7 @@ func parseCRLExtensions(c *pkix.CertificateList) (*certificateListExt, error) {
 		case oidAuthorityKeyIdentifier.Equal(ext.Id):
 			var a authKeyID
 			if rest, err := asn1.Unmarshal(ext.Value, &a); err != nil {
-				return nil, fmt.Errorf("asn1.Unmarshal failed. err = %v", err)
+				return nil, fmt.Errorf("asn1.Unmarshal failed: %v", err)
 			} else if len(rest) != 0 {
 				return nil, errors.New("trailing data after AKID extension")
 			}
@@ -395,7 +395,7 @@ func parseCRLExtensions(c *pkix.CertificateList) (*certificateListExt, error) {
 		case oidIssuingDistributionPoint.Equal(ext.Id):
 			var dp issuingDistributionPoint
 			if rest, err := asn1.Unmarshal(ext.Value, &dp); err != nil {
-				return nil, fmt.Errorf("asn1.Unmarshal failed. err = %v", err)
+				return nil, fmt.Errorf("asn1.Unmarshal failed: %v", err)
 			} else if len(rest) != 0 {
 				return nil, errors.New("trailing data after IssuingDistributionPoint extension")
 			}
@@ -431,10 +431,10 @@ func fetchCRL(rawIssuer []byte, cfg RevocationConfig) (*certificateListExt, erro
 		var r pkix.RDNSequence
 		rest, err := asn1.Unmarshal(rawIssuer, &r)
 		if len(rest) != 0 || err != nil {
-			return nil, fmt.Errorf("asn1.Unmarshal(Issuer) len(rest) = %v, err = %v", len(rest), err)
+			return nil, fmt.Errorf("asn1.Unmarshal(Issuer) len(rest) = %d failed: %v", len(rest), err)
 		}
 		crlPath := fmt.Sprintf("%s.r%d", filepath.Join(cfg.RootDir, x509NameHash(r)), i)
-		crlBytes, err := ioutil.ReadFile(crlPath)
+		crlBytes, err := os.ReadFile(crlPath)
 		if err != nil {
 			// Break when we can't read a CRL file.
 			grpclogLogger.Infof("readFile: %v", err)
@@ -444,11 +444,11 @@ func fetchCRL(rawIssuer []byte, cfg RevocationConfig) (*certificateListExt, erro
 		crl, err := x509.ParseCRL(crlBytes)
 		if err != nil {
 			// Parsing errors for a CRL shouldn't happen so fail.
-			return nil, fmt.Errorf("x509.ParseCrl(%v) failed err = %v", crlPath, err)
+			return nil, fmt.Errorf("x509.ParseCrl(%v) failed: %v", crlPath, err)
 		}
 		var certList *certificateListExt
 		if certList, err = parseCRLExtensions(crl); err != nil {
-			grpclogLogger.Infof("fetchCRL: unsupported crl %v, err = %v", crlPath, err)
+			grpclogLogger.Infof("fetchCRL: unsupported crl %v: %v", crlPath, err)
 			// Continue to find a supported CRL
 			continue
 		}

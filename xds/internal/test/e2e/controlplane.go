@@ -21,8 +21,8 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-	xdsinternal "google.golang.org/grpc/internal/xds"
-	"google.golang.org/grpc/xds/internal/testutils/e2e"
+	"google.golang.org/grpc/internal/testutils/xds/bootstrap"
+	"google.golang.org/grpc/internal/testutils/xds/e2e"
 )
 
 type controlPlane struct {
@@ -33,14 +33,13 @@ type controlPlane struct {
 
 func newControlPlane() (*controlPlane, error) {
 	// Spin up an xDS management server on a local port.
-	server, err := e2e.StartManagementServer()
+	server, err := e2e.StartManagementServer(e2e.ManagementServerOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to spin up the xDS management server: %v", err)
 	}
 
 	nodeID := uuid.New().String()
-	bootstrapContentBytes, err := xdsinternal.BootstrapContents(xdsinternal.BootstrapOptions{
-		Version:                            xdsinternal.TransportV3,
+	bootstrapContentBytes, err := bootstrap.Contents(bootstrap.Options{
 		NodeID:                             nodeID,
 		ServerURI:                          server.Address,
 		ServerListenerResourceNameTemplate: e2e.ServerListenerResourceNameTemplate,

@@ -272,12 +272,12 @@ func buildProviderFunc(configs map[string]*certprovider.BuildableConfig, instanc
 	return provider, nil
 }
 
-func outlierDetectionToConfig(od *xdsresource.OutlierDetection) *outlierdetection.LBConfig { // Already validated - no need to return error
+func outlierDetectionToConfig(od *xdsresource.OutlierDetection) outlierdetection.LBConfig { // Already validated - no need to return error
 	if od == nil {
 		// "If the outlier_detection field is not set in the Cluster message, a
 		// "no-op" outlier_detection config will be generated, with interval set
 		// to the maximum possible value and all other fields unset." - A50
-		return &outlierdetection.LBConfig{
+		return outlierdetection.LBConfig{
 			Interval: 1<<63 - 1,
 		}
 	}
@@ -308,7 +308,7 @@ func outlierDetectionToConfig(od *xdsresource.OutlierDetection) *outlierdetectio
 		}
 	}
 
-	return &outlierdetection.LBConfig{
+	return outlierdetection.LBConfig{
 		Interval:                  od.Interval,
 		BaseEjectionTime:          od.BaseEjectionTime,
 		MaxEjectionTime:           od.MaxEjectionTime,
@@ -349,7 +349,7 @@ func (b *cdsBalancer) handleWatchUpdate(update clusterHandlerUpdate) {
 	if b.childLB == nil {
 		childLB, err := newChildBalancer(b.ccw, b.bOpts)
 		if err != nil {
-			b.logger.Errorf("Failed to create child policy of type %s, %v", clusterresolver.Name, err)
+			b.logger.Errorf("Failed to create child policy of type %s: %v", clusterresolver.Name, err)
 			return
 		}
 		b.childLB = childLB
